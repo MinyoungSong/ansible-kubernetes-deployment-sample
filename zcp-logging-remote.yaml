@@ -1,0 +1,340 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: zcp-logging-remote-fluentd
+  namespace: zcp-logging-remote
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRole
+metadata:
+  name: zcp-logging-remote-fluentd-read
+  namespace: zcp-logging-remote
+rules:
+- apiGroups: [""]
+  resources:
+  - namespaces
+  - pods
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+  name: zcp-logging-remote-fluentd-read
+  namespace: zcp-logging-remote
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: zcp-logging-remote-fluentd-read
+subjects:
+- kind: ServiceAccount
+  name: zcp-logging-remote-fluentd
+  namespace: zcp-logging-remote
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fluentd-agg-svc
+  namespace: zcp-logging-remote
+  labels:
+    k8s-app: fluentd-agg
+spec:
+  type: ClusterIP
+  selector:
+    k8s-app: fluentd-agg
+  ports:
+  - name: fwd-input
+    port: 24224
+    protocol: TCP
+  - name: fwd-input-udp
+    port: 24224
+    protocol: UDP
+  - name: prom-metrics
+    port: 24231
+    protocol: TCP
+  - name: monitor-agent
+    port: 24220
+    protocol: TCP
+  - name: http-input
+    port: 9880
+    protocol: TCP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentd-config-ds
+  namespace: zcp-logging-remote
+  labels:
+    k8s-app: fluentd
+data:
+  fluentd.conf: |
+    # Use the config specified by the FLUENTD_CONFIG environment variable, or
+    # default to fluentd-standalone.conf
+    @include "#{ENV['FLUENTD_CONFIG'] || 'fluentd-standalone.conf'}"
+  # A config for running Fluentd as a daemon which collects, filters, parses,
+  # and sends log to storage. No extra fluentd processes required.
+  fluentd-standalone.conf: |
+    # Common config
+    @include general.conf
+    @include kubernetes-input.conf
+    @include output.conf
+  
+  general.conf: |
+    <match fluent.**>
+      type null
+    </match>
+
+    <source>
+      @type http
+      port 9880
+      bind 0.0.0.0
+    </source>
+    
+  kubernetes-input.conf: |
+
+    <source>
+      @type tail
+      @id in_tail_containers_logs
+      path /var/log/containers/*.log
+      pos_file /var/log/containers.log.pos
+      tag kubernetes.containers_logs.*
+      read_from_head false
+      <parse>
+        @type multi_format
+        <pattern>
+          format json
+          time_key time
+          time_format %Y-%m-%dT%H:%M:%S.%NZ
+          keep_time_key true
+        </pattern>
+        <pattern>
+          format regexp
+          time_key time
+          keep_time_key true
+          time_format %Y-%m-%dT%H:%M:%S.%N%:z
+          expression /^(?<time>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7,}Z) (?<stream>stdout|stderr) (?<partial_flag>[FP]) (?<log>.*)$/
+        </pattern>
+      </parse>
+    </source>
+
+  output.conf: |
+
+    <match kubernetes.containers_logs.**>
+      @type forward
+      <server>
+        name fluentd-agg-svc
+        host fluentd-agg-svc
+        port 24224
+      </server>
+    </match>
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentd-config-agg
+  namespace: zcp-logging-remote
+  labels:
+    k8s-app: fluentd
+data:
+  fluentd.conf: |
+    # Use the config specified by the FLUENTD_CONFIG environment variable, or
+    # default to fluentd-standalone.conf
+    @include "#{ENV['FLUENTD_CONFIG'] || 'fluentd-standalone.conf'}"
+  # A config for running Fluentd as a daemon which collects, filters, parses,
+  # and sends log to storage. No extra fluentd processes required.
+  fluentd-standalone.conf: |
+    # Common config
+    @include general.conf
+    @include kubernetes-input.conf
+    @include kubernetes-filter.conf
+    # Send to storage
+    @include output.conf
+  
+  general.conf: |
+    # Prevent fluentd from handling records containing its own logs. Otherwise
+    # it can lead to an infinite loop, when error in sending one message generates
+    # another message which also fails to be sent and so on.
+    <match fluent.**>
+      type null
+    </match>
+    # Used for health checking
+    <source>
+      @type http
+      port 9880
+      bind 0.0.0.0
+    </source>
+    
+  kubernetes-input.conf: |
+
+    <source>
+      @type forward
+      port 24224
+      bind 0.0.0.0
+    </source>
+
+  kubernetes-filter.conf: |
+
+    <filter kubernetes.**>
+      @type record_transformer
+      <record>
+        clustername "#{ENV['CLUSTER_NAME']}"
+      </record>
+    </filter>
+
+    <filter kubernetes.**>
+      @type kubernetes_metadata
+      @id filter_kube_metadata
+    </filter>
+
+    # <filter kubernetes.containers_logs.**>
+    #   @type parser
+    #   format json # apache2, nginx, etc...
+    #   key_name log
+    #   reserve_data true
+    # </filter>
+  
+  output.conf: |
+    <match kubernetes.containers_logs.**>
+      @type forward
+      <server>
+        name fluentd-es-svc
+        host "#{ENV['TARGET_FLUENTD_HOST']}" #fluentd-es-svc
+        port "#{ENV['TARGET_FLUENTD_PORT']}" #24224
+        # host 169.56.72.171 # DNS 없을 경우는 public ip로 대체 필요.
+        # port 30224
+      </server>
+    </match>
+  
+---
+apiVersion: extensions/v1beta1
+kind: DaemonSet
+metadata:
+  name: fluentd-ds
+  namespace: zcp-logging-remote
+  labels:
+    k8s-app: fluentd
+    component: logging-agent
+spec:
+  # minReadySeconds: 10
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        k8s-app: fluentd
+    spec:
+      containers:
+      - name: fluentd
+        image: stgcluster01.icp:8500/zcp/fluentd:1.2.5
+        imagePullPolicy: Always
+        command: ["fluentd", "-c", "/fluentd/etc/fluentd.conf", "-p", "/fluentd/plugins"]
+        env:
+        - name: FLUENTD_CONFIG
+          value: fluentd-standalone.conf
+        # resources:
+        #   limits:
+        #     memory: 200Mi
+        #   requests:
+        #     cpu: 500m
+        #     memory: 200Mi
+        ports:
+        - name: prom-metrics
+          containerPort: 24231
+          protocol: TCP
+        - name: monitor-agent
+          containerPort: 24220
+          protocol: TCP
+        - name: http-input
+          containerPort: 9880
+          protocol: TCP
+        volumeMounts:
+        - name: varlog
+          mountPath: /var/log
+        - name: varlibdockercontainers
+          mountPath: /var/lib
+          # mountPath: /var/data
+          readOnly: true
+        - name: fluentd-config-ds
+          mountPath: /fluentd/etc
+      volumes:
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: varlibdockercontainers
+        hostPath:
+          path: /var/lib
+          # path: /var/data
+      - name: fluentd-config-ds
+        configMap:
+          name: fluentd-config-ds
+      terminationGracePeriodSeconds: 60
+      serviceAccountName: zcp-logging-remote-fluentd
+      tolerations:
+      - effect: NoSchedule
+        operator: Exists
+      - effect: NoExecute
+        operator: Exists
+---
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: fluentd-agg
+  namespace: zcp-logging-remote
+  labels:
+    k8s-app: fluentd-agg
+    component: logging-agent
+spec:
+  # minReadySeconds: 10
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        k8s-app: fluentd-agg
+    spec:
+      containers:
+      - name: fluentd
+        image: stgcluster01.icp:8500/zcp/fluentd:1.2.5
+        imagePullPolicy: Always
+        command: ["fluentd", "-c", "/fluentd/etc/fluentd.conf", "-p", "/fluentd/plugins"]
+        env:
+        - name: FLUENTD_CONFIG
+          value: fluentd-standalone.conf
+        - name: CLUSTER_NAME
+          value: "cluster-test"
+        - name: TARGET_FLUENTD_HOST
+          value: "fluentd-es-svc.zcp-logging"
+        - name: TARGET_FLUENTD_PORT
+          value: "24224"
+        # resources:
+        #   limits:
+        #     memory: 200Mi
+        #   requests:
+        #     cpu: 500m
+        #     memory: 200Mi
+        ports:
+        - name: fwd-input
+          containerPort: 24224
+          protocol: TCP
+        - name: fwd-input-udp
+          containerPort: 24224
+          protocol: UDP
+        - name: prom-metrics
+          containerPort: 24231
+          protocol: TCP
+        - name: monitor-agent
+          containerPort: 24220
+          protocol: TCP
+        - name: http-input
+          containerPort: 9880
+          protocol: TCP
+        volumeMounts:
+        - name: fluentd-config-agg
+          mountPath: /fluentd/etc
+      volumes:
+      - name: fluentd-config-agg
+        configMap:
+          name: fluentd-config-agg
+      terminationGracePeriodSeconds: 60
+      serviceAccountName: zcp-logging-remote-fluentd
+---

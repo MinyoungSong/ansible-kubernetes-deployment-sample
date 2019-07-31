@@ -1,0 +1,26 @@
+# If we should deploy this kubernetes or not.  
+# Setting this to false and re-running our deploy playbook will remove the kubernetes deployment 
+# example to remove: ansible-playbook kubernetes/kube.deployment.playbook.yml --extra-vars '{deployment_enabled: false}'
+deployment_enabled: true 
+
+deployment_template_file: "template-zcp-logging-remote.yaml"
+deployment_file: "zcp-logging-remote.yaml"
+
+releasename: zcp-logging-remote
+
+kube_contextname: stgcluster01-context
+
+create_namespace: false
+namespace: zcp-logging-remote
+
+fluentd:
+  common:
+    image: stgcluster01.icp:8500/zcp/fluentd
+    tag: 1.2.5
+  pub:
+    clustername: cluster-test
+    target_fluentd_host: fluentd-es-svc.zcp-logging
+    target_fluentd_port: 24224
+    varlibdockercontainers: /var/lib
+    
+

@@ -1,0 +1,35 @@
+- hosts:
+    - localhost
+  
+  vars_files:
+    - ./zcp-logging-remote-values.yaml
+
+  tasks:
+
+    - name: check release name
+      fail:
+        msg: "Please specify an app name and all relevant info in kube-vars.yml to use this" 
+      when: "releasename == '<app_name>'"
+
+    - name: create manifest template for kube deploy 
+      template:
+        src: "{{deployment_template_file}}"
+        dest: "./{{deployment_file}}"
+      register: deploy_template
+
+    # Applys 
+    - block: 
+        - name: apply kubernetes deployment
+          shell: "kubectl apply -f ./{{deployment_file}} --context={{kube_contextname}}"
+      when: "deployment_enabled"
+
+
+    # Removals
+    - block:
+        - name: remove kubernetes deployment
+          shell: "kubectl delete -f ./{{deployment_file}} --context={{kube_contextname}}"
+          register: remove_kube_deployment
+      when: not deployment_enabled
+
+
+
