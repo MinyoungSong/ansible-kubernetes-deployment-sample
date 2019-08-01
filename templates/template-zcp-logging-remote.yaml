@@ -198,6 +198,44 @@ data:
     #   key_name log
     #   reserve_data true
     # </filter>
+
+    ############# 특정 로그 패턴 제외 예제 #############
+    # [같은 key 내에서 OR 조건]
+    # <filter kubernetes.**>
+    #   @type grep
+    #   <exclude>
+    #     key $.kubernetes.namespace_name
+    #     pattern /^(istio-system|kube-system)$/
+    #   </exclude>
+    # </filter>
+
+    # [다른 key에서 OR 조건]
+    # <filter kubernetes.**>
+    #   @type grep
+    #   <exclude>
+    #     key $.kubernetes.namespace_name
+    #     pattern /^(zaction)$/
+    #   </exclude>
+    #   <exclude>
+    #     key $.kubernetes.labels.app
+    #     pattern /^(helm-repo)$/
+    #   </exclude>
+    # </filter>
+
+    # [다른 key에서 AND 조건]
+    # <filter kubernetes.**>
+    #   @type grep
+    #   <and>
+    #     <exclude>
+    #       key $.kubernetes.namespace_name
+    #       pattern /^(zaction)$/
+    #     </exclude>
+    #     <exclude>
+    #       key $.kubernetes.labels.app
+    #       pattern /^(helm-repo)$/
+    #     </exclude>
+    #   </and>
+    # </filter>
   
   output.conf: |
     <match kubernetes.containers_logs.**>
