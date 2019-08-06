@@ -21,6 +21,6 @@ fluentd:
     clustername: cluster-test
     target_fluentd_host: fluentd-es-svc.zcp-logging
     target_fluentd_port: 24224
-    varlibdockercontainers: /var/lib
+    varlibdockercontainers: /var/lib #IKS에 설치하는 경우 /var/data 로 변경
     
 
